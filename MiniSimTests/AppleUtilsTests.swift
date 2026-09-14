@@ -37,6 +37,7 @@ class AppleUtilsTests: XCTestCase {
 
   override func tearDown() {
     shellStub.tearDown()
+    AppleUtils.fileExists = { FileManager.default.fileExists(atPath: $0) }
     super.tearDown()
   }
 
@@ -78,30 +79,81 @@ class AppleUtilsTests: XCTestCase {
     waitForExpectations(timeout: 5, handler: nil)
   }
 
-  func testLaunchSimulatorAppWhenNotRunning() {
-    let uuid = "test-uuid"
-    mockWorkspace.mockRunningApplications = [] // Simulator not running
-
+  private func stubXcodeSelect(developerDir: String = "/Applications/Xcode.app/Contents/Developer") {
     shellStub.mockedExecute = { command, _, _ in
       if command == DeviceConstants.ProcessPaths.xcodeSelect.rawValue {
-        return "/Applications/Xcode.app/Contents/Developer"
+        return developerDir
       }
       return ""
     }
+  }
+
+  func testLaunchSimulatorAppWhenNotRunning() {
+    let uuid = "test-uuid"
+    mockWorkspace.mockRunningApplications = [] // Simulator not running
+    stubXcodeSelect()
+    // Xcode 26 and earlier: Simulator.app is present.
+    AppleUtils.fileExists = { $0.hasSuffix("Developer/Applications/Simulator.app") }
 
     XCTAssertNoThrow(try AppleUtils.launchSimulatorApp(uuid: uuid))
 
-    XCTAssertEqual(shellStub.lastExecutedCommand, "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator")
-    XCTAssertEqual(shellStub.lastPassedArguments, ["--args", "-CurrentDeviceUDID", uuid])
+    XCTAssertEqual(shellStub.lastExecutedCommand, DeviceConstants.ProcessPaths.open.rawValue)
+    XCTAssertEqual(shellStub.lastPassedArguments, [
+      "-a",
+      "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app",
+      "--args",
+      "-CurrentDeviceUDID",
+      uuid
+    ])
+  }
+
+  func testLaunchSimulatorAppFallsBackToDeviceHubOnXcode27() {
+    let uuid = "test-uuid"
+    mockWorkspace.mockRunningApplications = []
+    stubXcodeSelect()
+    // Xcode 27 removed Simulator.app; only Device Hub exists.
+    AppleUtils.fileExists = { $0.hasSuffix("Contents/Applications/DeviceHub.app") }
+
+    XCTAssertNoThrow(try AppleUtils.launchSimulatorApp(uuid: uuid))
+
+    XCTAssertEqual(shellStub.lastExecutedCommand, DeviceConstants.ProcessPaths.open.rawValue)
+    // Device Hub ignores -CurrentDeviceUDID, so it must not be passed.
+    XCTAssertEqual(shellStub.lastPassedArguments, [
+      "-a",
+      "/Applications/Xcode.app/Contents/Applications/DeviceHub.app"
+    ])
+  }
+
+  func testLaunchSimulatorAppThrowsWhenNoSimulatorAppInstalled() {
+    mockWorkspace.mockRunningApplications = []
+    stubXcodeSelect()
+    AppleUtils.fileExists = { _ in false }
+
+    XCTAssertThrowsError(try AppleUtils.launchSimulatorApp(uuid: "test-uuid")) { error in
+      XCTAssertEqual(error as? DeviceError, DeviceError.xcodeError)
+    }
   }
 
   func testLaunchSimulatorAppWhenAlreadyRunning() {
     let uuid = "test-uuid"
-    mockWorkspace.mockRunningApplications = [MockNSRunningApplication(bundleIdentifier: "com.apple.iphonesimulator")]
+    mockWorkspace.mockRunningApplications = [
+      MockNSRunningApplication(bundleIdentifier: DeviceConstants.BundleID.simulator.rawValue)
+    ]
 
     XCTAssertNoThrow(try AppleUtils.launchSimulatorApp(uuid: uuid))
 
     XCTAssertTrue(shellStub.lastExecutedCommand.isEmpty, "Should not execute any command when simulator is already running")
+  }
+
+  func testLaunchSimulatorAppWhenDeviceHubAlreadyRunning() {
+    let uuid = "test-uuid"
+    mockWorkspace.mockRunningApplications = [
+      MockNSRunningApplication(bundleIdentifier: DeviceConstants.BundleID.deviceHub.rawValue)
+    ]
+
+    XCTAssertNoThrow(try AppleUtils.launchSimulatorApp(uuid: uuid))
+
+    XCTAssertTrue(shellStub.lastExecutedCommand.isEmpty, "Should not execute any command when Device Hub is already running")
   }
 
   func testLaunchSimulatorAppWithXcodeError() {

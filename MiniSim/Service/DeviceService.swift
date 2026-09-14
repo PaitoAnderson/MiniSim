@@ -43,6 +43,7 @@ extension DeviceServiceCommon {
       guard
         let bundleURL = app.bundleURL?.absoluteString,
         bundleURL.contains(DeviceConstants.BundleURL.simulator.rawValue) ||
+          bundleURL.contains(DeviceConstants.BundleURL.deviceHub.rawValue) ||
           bundleURL.contains(DeviceConstants.BundleURL.emulator.rawValue) else {
         continue
       }
