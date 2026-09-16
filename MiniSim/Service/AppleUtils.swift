@@ -46,15 +46,19 @@ class AppleUtils {
     return nil
   }
 
-  static func launchSimulatorApp(uuid: String) throws {
-    let isSimulatorRunning = workspace.runningApplications
-      .contains {
-        $0.bundleIdentifier == DeviceConstants.BundleID.simulator.rawValue ||
-          $0.bundleIdentifier == DeviceConstants.BundleID.deviceHub.rawValue
-      }
+  /// Device Hub registers the `devices://` URL scheme. Opening this link launches it
+  /// if needed and shows that device's own window, which is how a specific device is
+  /// targeted on Xcode 27+ (`-CurrentDeviceUDID` is ignored by Device Hub).
+  /// The call is idempotent: repeating it re-focuses the existing window.
+  static func deviceHubDeepLink(uuid: String) -> String {
+    "devices://device/open?id=\(uuid)"
+  }
 
-    guard !isSimulatorRunning else { return }
-
+  /// Ensures the simulator GUI is running and showing `uuid`.
+  /// Returns true when Device Hub handled it, meaning the device window is already
+  /// focused and no accessibility fallback is needed.
+  @discardableResult
+  static func launchSimulatorApp(uuid: String) throws -> Bool {
     guard let activeDeveloperDir = try? shell.execute(
       command: DeviceConstants.ProcessPaths.xcodeSelect.rawValue,
       arguments: ["-p"]
@@ -64,17 +68,30 @@ class AppleUtils {
       throw DeviceError.xcodeError
     }
 
-    // Launch through LaunchServices rather than exec'ing the binary: Device Hub is
-    // sandboxed and has to be started as an app bundle.
-    var arguments = ["-a", app.path]
-    if !app.isDeviceHub {
-      // Device Hub shows every booted device in a single window and ignores this flag.
-      arguments += ["--args", "-CurrentDeviceUDID", uuid]
+    if app.isDeviceHub {
+      // Always fired, even when Device Hub is already up: it is what switches the
+      // focused device, so an early return here would strand the user on the
+      // previously opened one. An unknown uuid is a safe no-op.
+      try shell.execute(
+        command: DeviceConstants.ProcessPaths.open.rawValue,
+        arguments: uuid.isEmpty ? ["-a", app.path] : [deviceHubDeepLink(uuid: uuid)]
+      )
+      return true
     }
 
+    // Simulator.app ignores -CurrentDeviceUDID once running, so only launch it once.
+    // Deliberately not checking SimulatorTrampoline here: it lingers after the GUI
+    // quits, so treating it as "running" would suppress the launch entirely.
+    let isSimulatorRunning = workspace.runningApplications
+      .contains { $0.bundleIdentifier == DeviceConstants.BundleID.simulator.rawValue }
+
+    guard !isSimulatorRunning else { return false }
+
+    // Launch through LaunchServices rather than exec'ing the binary.
     try shell.execute(
       command: DeviceConstants.ProcessPaths.open.rawValue,
-      arguments: arguments
+      arguments: ["-a", app.path, "--args", "-CurrentDeviceUDID", uuid]
     )
+    return false
   }
 }
